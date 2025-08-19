@@ -1,0 +1,21 @@
+# Binaries
+server
+
+# Vendor and dependencies
+vendor/
+
+# OS files
+.DS_Store
+
+# Node modules (if any)
+node_modules/
+
+# Git
+.git
+.gitignore
+
+# IDE/editor files
+*.swp
+*.swo
+*.idea/
+.vscode/ 

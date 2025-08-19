@@ -8,6 +8,7 @@ import (
 	"sealhome/data"
 	"sync"
 )
+
 const webPort = "9004"
 
 func (app *Config) serve() {
@@ -31,14 +32,15 @@ func main() {
 		Wait:          &sync.WaitGroup{},
 		ErrorChan:     make(chan error),
 		ErrorChanDone: make(chan bool),
+		OAuthConfig:   loadOAuthConfig(),
 	}
-//connect to the database
-db := app.initDB()
 
-app.DB = db
+	// connect to the database and run migrations
+	db := app.initDB()
+	app.DB = db
 
-// Initialize data models
-app.Models = data.New(db)
+	// Initialize data models after DB is ready
+	app.Models = data.New(db)
 
-app.serve()
+	app.serve()
 }
