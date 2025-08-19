@@ -3,15 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math/rand"
 	"net/http"
 	"sealhome/data"
+	"sealhome/pkg/middleware"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
 	googleoauth2 "golang.org/x/oauth2/google"
 	googleoauth2api "google.golang.org/api/oauth2/v2"
@@ -75,11 +73,11 @@ type GoogleOAuthResponse struct {
 	Message string     `json:"message,omitempty"`
 }
 
-// JWT Claims structure
+// JWT Claims structure (keeping for backward compatibility)
 type Claims struct {
 	UserID uint   `json:"user_id"`
 	Email  string `json:"email"`
-	jwt.RegisteredClaims
+	Role   string `json:"role"`
 }
 
 // In-memory storage for password reset codes (in production, use Redis or database)
@@ -91,8 +89,7 @@ type resetCodeInfo struct {
 	ExpiresAt time.Time
 }
 
-// JWT secret key (in production, use environment variable)
-var jwtSecret = []byte("your-secret-key-change-in-production")
+// JWT secret key is now handled by the JWT service
 
 // getGoogleOAuthConfig returns OAuth configuration for Google
 func (app *Config) getGoogleOAuthConfig() *oauth2.Config {
@@ -153,8 +150,8 @@ func (app *Config) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate JWT token
-	token, err := generateJWT(user.ID, user.Email)
+	// Generate JWT token using the JWT service
+	token, err := app.JWTService.GenerateToken(user.ID, user.Email, user.Role, nil, nil)
 	if err != nil {
 		app.ErrorLog.Printf("Error generating JWT: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -217,6 +214,7 @@ func (app *Config) SignupHandler(w http.ResponseWriter, r *http.Request) {
 		Email:    req.Email,
 		Phone:    req.Phone,
 		Password: req.Password,
+		Role:     "user", // Default role for new users
 	}
 
 	userID, err := app.Models.User.Insert(newUser)
@@ -353,69 +351,9 @@ func (app *Config) ResetPasswordHandler(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(response)
 }
 
-// AuthMiddleware validates JWT token
-func (app *Config) AuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "Authorization header required", http.StatusUnauthorized)
-			return
-		}
-
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		if tokenString == authHeader {
-			http.Error(w, "Bearer token required", http.StatusUnauthorized)
-			return
-		}
-
-		claims, err := validateJWT(tokenString)
-		if err != nil {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		// Add user info to request context
-		ctx := r.Context()
-		ctx = context.WithValue(ctx, "userID", claims.UserID)
-		ctx = context.WithValue(ctx, "userEmail", claims.Email)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
+// AuthMiddleware is now handled by the middleware package
 
 // Helper functions
-func generateJWT(userID uint, email string) (string, error) {
-	claims := Claims{
-		UserID: userID,
-		Email:  email,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // 24 hours
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(jwtSecret)
-}
-
-func validateJWT(tokenString string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return jwtSecret, nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-		return claims, nil
-	}
-
-	return nil, fmt.Errorf("invalid token")
-}
 
 func generateResetCode() string {
 	rand.Seed(time.Now().UnixNano())
@@ -424,9 +362,13 @@ func generateResetCode() string {
 
 // User Profile Handlers
 func (app *Config) GetUserProfileHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
 
-	user, err := app.Models.User.GetOne(userID)
+	user, err := app.Models.User.GetOne(claims.UserID)
 	if err != nil {
 		app.ErrorLog.Printf("Error getting user profile: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -537,8 +479,8 @@ func (app *Config) GoogleOAuthCallbackHandler(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Generate JWT token
-	jwtToken, err := generateJWT(user.ID, user.Email)
+	// Generate JWT token using the JWT service
+	jwtToken, err := app.JWTService.GenerateToken(user.ID, user.Email, user.Role, nil, nil)
 	if err != nil {
 		app.ErrorLog.Printf("Error generating JWT: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -580,7 +522,11 @@ func generateRandomPassword() string {
 }
 
 func (app *Config) UpdateUserProfileHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
 
 	var req struct {
 		Username string `json:"username"`
@@ -592,7 +538,7 @@ func (app *Config) UpdateUserProfileHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	user, err := app.Models.User.GetOne(userID)
+	user, err := app.Models.User.GetOne(claims.UserID)
 	if err != nil {
 		app.ErrorLog.Printf("Error getting user: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)

@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 
+	authmiddleware "sealhome/pkg/middleware"
+
 	"github.com/go-chi/chi/middleware"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
@@ -31,6 +33,7 @@ func (app *Config) routes() http.Handler {
 		r.Post("/signup", app.SignupHandler)
 		r.Post("/forgot-password", app.ForgotPasswordHandler)
 		r.Post("/reset-password", app.ResetPasswordHandler)
+		r.Post("/device", app.DeviceAuthHandler) // Device authentication
 
 		// OAuth routes
 		r.Get("/google", app.GoogleOAuthLoginHandler)
@@ -39,7 +42,7 @@ func (app *Config) routes() http.Handler {
 
 	// Protected routes (authentication required)
 	mux.Route("/api", func(r chi.Router) {
-		r.Use(app.AuthMiddleware)
+		r.Use(authmiddleware.AuthMiddleware(app.JWTService))
 
 		// User routes
 		r.Route("/users", func(r chi.Router) {

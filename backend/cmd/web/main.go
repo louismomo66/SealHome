@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"os"
 	"sealhome/data"
+	"sealhome/pkg/jwt"
 	"sync"
+
+	"github.com/joho/godotenv"
 )
 
 const webPort = "9004"
@@ -23,9 +26,21 @@ func (app *Config) serve() {
 	}
 }
 func main() {
+	// Load environment variables
+	if err := godotenv.Load(); err != nil {
+		log.Println("Warning: .env file not found, using system environment variables")
+	}
+
 	//setup loggs
 	infoLog := log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
 	errorLog := log.New(os.Stdout, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
+
+	// Initialize JWT service
+	jwtService, err := jwt.NewJWTService()
+	if err != nil {
+		log.Fatalf("Failed to initialize JWT service: %v", err)
+	}
+
 	app := Config{
 		InfoLog:       infoLog,
 		ErrorLog:      errorLog,
@@ -33,6 +48,7 @@ func main() {
 		ErrorChan:     make(chan error),
 		ErrorChanDone: make(chan bool),
 		OAuthConfig:   loadOAuthConfig(),
+		JWTService:    jwtService,
 	}
 
 	// connect to the database and run migrations

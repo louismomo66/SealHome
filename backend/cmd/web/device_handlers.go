@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"sealhome/data"
+	"sealhome/pkg/middleware"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +23,12 @@ func isValidMACAddress(mac string) bool {
 
 // Device Handlers
 func (app *Config) GetUserDevicesHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	userID := claims.UserID
 
 	// Get query parameters for filtering and pagination
 	deviceType := r.URL.Query().Get("device_type")
@@ -109,7 +115,12 @@ func (app *Config) GetUserDevicesHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (app *Config) AddDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	userID := claims.UserID
 
 	var req struct {
 		DeviceType string `json:"device_type"`
@@ -165,7 +176,12 @@ func (app *Config) AddDeviceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Config) GetDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	userID := claims.UserID
 	deviceIDStr := chi.URLParam(r, "deviceID")
 
 	deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
@@ -197,7 +213,12 @@ func (app *Config) GetDeviceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Config) UpdateDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	userID := claims.UserID
 	deviceIDStr := chi.URLParam(r, "deviceID")
 
 	deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
@@ -264,7 +285,12 @@ func (app *Config) UpdateDeviceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Config) DeleteDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	userID := claims.UserID
 	deviceIDStr := chi.URLParam(r, "deviceID")
 
 	deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
@@ -298,7 +324,12 @@ func (app *Config) DeleteDeviceHandler(w http.ResponseWriter, r *http.Request) {
 
 // GetUserDeviceStatsHandler returns statistics about the user's devices
 func (app *Config) GetUserDeviceStatsHandler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(uint)
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	userID := claims.UserID
 
 	// Get all devices for the user
 	devices, err := app.Models.Device.GetDevicesByUserID(userID)
@@ -336,4 +367,95 @@ func (app *Config) GetUserDeviceStatsHandler(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// DeviceAuthHandler handles device authentication and generates JWT with device info
+func (app *Config) DeviceAuthHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Email      string `json:"email"`
+		Password   string `json:"password"`
+		DeviceID   uint   `json:"device_id"`
+		MACAddress string `json:"mac_address"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate input
+	if req.Email == "" || req.Password == "" || req.DeviceID == 0 {
+		http.Error(w, "Email, password, and device ID are required", http.StatusBadRequest)
+		return
+	}
+
+	// Get user by email
+	user, err := app.Models.User.GetByEmail(req.Email)
+	if err != nil {
+		app.ErrorLog.Printf("Error getting user by email: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if user == nil {
+		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
+		return
+	}
+
+	// Check password
+	matches, err := app.Models.User.PasswordMatches(user, req.Password)
+	if err != nil {
+		app.ErrorLog.Printf("Error checking password: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if !matches {
+		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
+		return
+	}
+
+	// Verify device belongs to user
+	device, err := app.Models.Device.GetOne(req.DeviceID)
+	if err != nil {
+		app.ErrorLog.Printf("Error getting device: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if device == nil {
+		http.Error(w, "Device not found", http.StatusNotFound)
+		return
+	}
+
+	if device.UserID != user.ID {
+		http.Error(w, "Device does not belong to user", http.StatusForbidden)
+		return
+	}
+
+	// Generate JWT token with device information
+	token, err := app.JWTService.GenerateToken(user.ID, user.Email, user.Role, &device.ID, &device.MACAddress)
+	if err != nil {
+		app.ErrorLog.Printf("Error generating JWT: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Create response
+	response := map[string]interface{}{
+		"success": true,
+		"token":   token,
+		"user":    user,
+		"device":  device,
+		"message": "Device authentication successful",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
