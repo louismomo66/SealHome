@@ -58,6 +58,12 @@ func (app *Config) routes() http.Handler {
 			r.Get("/{deviceID}", app.GetDeviceHandler)
 			r.Put("/{deviceID}", app.UpdateDeviceHandler)
 			r.Delete("/{deviceID}", app.DeleteDeviceHandler)
+
+			// MQTT-powered control/state
+			r.Post("/{deviceID}/relays/{relayIndex}", app.SetRelay)
+			r.Post("/{deviceID}/doorbell", app.RingDoorBell)
+			r.Get("/{deviceID}/states", app.GetStates)
+			r.Post("/{deviceID}/sensors/{sensorType}/{sensorIndex}", app.SetSensorState)
 		})
 	})
 

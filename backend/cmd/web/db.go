@@ -17,7 +17,7 @@ func (app *Config) initDB() *gorm.DB {
 	}
 
 	// Auto-migrate the schema using actual struct types
-	if err := conn.AutoMigrate(&data.User{}, &data.Device{}); err != nil {
+	if err := conn.AutoMigrate(&data.User{}, &data.Device{}, &data.PeripheralState{}); err != nil {
 		log.Panic("failed to migrate database:", err)
 	}
 	log.Println("Database migration completed successfully")

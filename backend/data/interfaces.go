@@ -21,3 +21,10 @@ type DeviceInterface interface {
 	AssignDevice(userID uint, device *Device) error
 	// Add other methods as needed
 }
+
+// PeripheralStateInterface defines methods for interacting with peripheral states
+type PeripheralStateInterface interface {
+	SetState(deviceID uint, peripheralType string, peripheralIndex int, state string) error
+	GetState(deviceID uint, peripheralType string, peripheralIndex int) (*PeripheralState, error)
+	GetStatesByDevice(deviceID uint) ([]*PeripheralState, error)
+}

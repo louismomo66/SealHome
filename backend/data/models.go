@@ -5,16 +5,18 @@ import "gorm.io/gorm"
 
 // Models aggregates all the repository interfaces.
 type Models struct {
-    User   UserInterface
-    Device DeviceInterface
-    // Add other repositories like Plan here if needed
+	User            UserInterface
+	Device          DeviceInterface
+	PeripheralState PeripheralStateInterface
+	// Add other repositories like Plan here if needed
 }
 
 // New creates an instance of the data package with initialized repositories.
 func New(gormDB *gorm.DB) Models {
-    return Models{
-        User:   NewUserRepository(gormDB),
-        Device: NewDeviceRepository(gormDB),
-        // Initialize other repositories here
-    }
+	return Models{
+		User:            NewUserRepository(gormDB),
+		Device:          NewDeviceRepository(gormDB),
+		PeripheralState: NewPeripheralStateRepository(gormDB),
+		// Initialize other repositories here
+	}
 }

@@ -369,93 +369,176 @@ func (app *Config) GetUserDeviceStatsHandler(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(stats)
 }
 
-// DeviceAuthHandler handles device authentication and generates JWT with device info
-func (app *Config) DeviceAuthHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// --- MQTT-powered controls and state endpoints ---
+
+// SetRelay publishes a command to set a relay state (index 0-1) for a device
+func (app *Config) SetRelay(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
 		return
 	}
-
-	var req struct {
-		Email      string `json:"email"`
-		Password   string `json:"password"`
-		DeviceID   uint   `json:"device_id"`
-		MACAddress string `json:"mac_address"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Validate input
-	if req.Email == "" || req.Password == "" || req.DeviceID == 0 {
-		http.Error(w, "Email, password, and device ID are required", http.StatusBadRequest)
-		return
-	}
-
-	// Get user by email
-	user, err := app.Models.User.GetByEmail(req.Email)
+	deviceIDParam := chi.URLParam(r, "deviceID")
+	relayParam := chi.URLParam(r, "relayIndex")
+	deviceID64, err := strconv.ParseUint(deviceIDParam, 10, 32)
 	if err != nil {
-		app.ErrorLog.Printf("Error getting user by email: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, "invalid device id", http.StatusBadRequest)
+		return
+	}
+	relayIndex, err := strconv.Atoi(relayParam)
+	if err != nil || relayIndex < 0 || relayIndex > 1 {
+		http.Error(w, "invalid relay index", http.StatusBadRequest)
 		return
 	}
 
-	if user == nil {
-		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
+	device, err := app.Models.Device.GetOne(uint(deviceID64))
+	if err != nil || device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+	if device.UserID != claims.UserID {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
-	// Check password
-	matches, err := app.Models.User.PasswordMatches(user, req.Password)
+	var body struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (body.State != "on" && body.State != "off") {
+		http.Error(w, "state must be 'on' or 'off'", http.StatusBadRequest)
+		return
+	}
+
+	if app.MQTT == nil {
+		http.Error(w, "MQTT not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Publish command only. Actual state will be updated by MQTT subscriber callback.
+	_ = app.MQTT.PublishCommand(device.ID, "relay", relayIndex, body.State)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// RingDoorBell publishes a doorbell trigger command
+func (app *Config) RingDoorBell(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	deviceIDParam := chi.URLParam(r, "deviceID")
+	deviceID64, err := strconv.ParseUint(deviceIDParam, 10, 32)
 	if err != nil {
-		app.ErrorLog.Printf("Error checking password: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, "invalid device id", http.StatusBadRequest)
 		return
 	}
-
-	if !matches {
-		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
+	device, err := app.Models.Device.GetOne(uint(deviceID64))
+	if err != nil || device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
 		return
 	}
+	if device.UserID != claims.UserID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if app.MQTT == nil {
+		http.Error(w, "MQTT not available", http.StatusServiceUnavailable)
+		return
+	}
+	_ = app.MQTT.PublishCommand(device.ID, "doorbell", 0, "ring")
+	w.WriteHeader(http.StatusNoContent)
+}
 
-	// Verify device belongs to user
-	device, err := app.Models.Device.GetOne(req.DeviceID)
+// GetStates returns the latest stored states for a device (persisted from MQTT)
+func (app *Config) GetStates(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	deviceIDParam := chi.URLParam(r, "deviceID")
+	deviceID64, err := strconv.ParseUint(deviceIDParam, 10, 32)
 	if err != nil {
-		app.ErrorLog.Printf("Error getting device: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, "invalid device id", http.StatusBadRequest)
 		return
 	}
-
-	if device == nil {
-		http.Error(w, "Device not found", http.StatusNotFound)
+	device, err := app.Models.Device.GetOne(uint(deviceID64))
+	if err != nil || device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
 		return
 	}
-
-	if device.UserID != user.ID {
-		http.Error(w, "Device does not belong to user", http.StatusForbidden)
+	if device.UserID != claims.UserID {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-
-	// Generate JWT token with device information
-	token, err := app.JWTService.GenerateToken(user.ID, user.Email, user.Role, &device.ID, &device.MACAddress)
+	states, err := app.Models.PeripheralState.GetStatesByDevice(device.ID)
 	if err != nil {
-		app.ErrorLog.Printf("Error generating JWT: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, "failed to fetch states", http.StatusInternalServerError)
 		return
 	}
-
-	// Create response
-	response := map[string]interface{}{
-		"success": true,
-		"token":   token,
-		"user":    user,
-		"device":  device,
-		"message": "Device authentication successful",
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(states)
+}
+
+// SetSensorState now only publishes a command; storage updates arrive via MQTT callback
+func (app *Config) SetSensorState(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "User not authenticated", http.StatusUnauthorized)
+		return
+	}
+	deviceIDParam := chi.URLParam(r, "deviceID")
+	stype := chi.URLParam(r, "sensorType") // "door" or "motion"
+	indexParam := chi.URLParam(r, "sensorIndex")
+	deviceID64, err := strconv.ParseUint(deviceIDParam, 10, 32)
+	if err != nil {
+		http.Error(w, "invalid device id", http.StatusBadRequest)
+		return
+	}
+	idx, err := strconv.Atoi(indexParam)
+	if err != nil {
+		http.Error(w, "invalid sensor index", http.StatusBadRequest)
+		return
+	}
+	if stype != "door" && stype != "motion" {
+		http.Error(w, "sensorType must be 'door' or 'motion'", http.StatusBadRequest)
+		return
+	}
+	max := 10
+	if stype == "motion" {
+		max = 5
+	}
+	if idx < 0 || idx >= max {
+		http.Error(w, "sensor index out of range", http.StatusBadRequest)
+		return
+	}
+
+	device, err := app.Models.Device.GetOne(uint(deviceID64))
+	if err != nil || device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+	if device.UserID != claims.UserID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var body struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.State == "" {
+		http.Error(w, "state required", http.StatusBadRequest)
+		return
+	}
+
+	if app.MQTT == nil {
+		http.Error(w, "MQTT not available", http.StatusServiceUnavailable)
+		return
+	}
+	_ = app.MQTT.PublishCommand(device.ID, stype, idx, body.State)
+	w.WriteHeader(http.StatusNoContent)
 }

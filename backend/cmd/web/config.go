@@ -5,6 +5,7 @@ import (
 	"os"
 	"sealhome/data"
 	"sealhome/pkg/jwt"
+	"sealhome/pkg/mqtt"
 	"sync"
 
 	"gorm.io/gorm"
@@ -17,6 +18,7 @@ type Config struct {
 	Wait       *sync.WaitGroup
 	Models     data.Models
 	JWTService *jwt.JWTService
+	MQTT       *mqtt.Manager
 	// Mailer Mail
 	ErrorChan     chan error
 	ErrorChanDone chan bool

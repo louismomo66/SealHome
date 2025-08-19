@@ -7,6 +7,7 @@ import (
 	"os"
 	"sealhome/data"
 	"sealhome/pkg/jwt"
+	"sealhome/pkg/mqtt"
 	"sync"
 
 	"github.com/joho/godotenv"
@@ -41,6 +42,12 @@ func main() {
 		log.Fatalf("Failed to initialize JWT service: %v", err)
 	}
 
+	// Initialize MQTT manager (optional)
+	mqttMgr, err := mqtt.NewManager()
+	if err != nil {
+		log.Printf("Warning: MQTT not connected: %v", err)
+	}
+
 	app := Config{
 		InfoLog:       infoLog,
 		ErrorLog:      errorLog,
@@ -49,6 +56,7 @@ func main() {
 		ErrorChanDone: make(chan bool),
 		OAuthConfig:   loadOAuthConfig(),
 		JWTService:    jwtService,
+		MQTT:          mqttMgr,
 	}
 
 	// connect to the database and run migrations
@@ -57,6 +65,16 @@ func main() {
 
 	// Initialize data models after DB is ready
 	app.Models = data.New(db)
+
+	// Subscribe to MQTT state updates and persist to DB
+	if app.MQTT != nil {
+		if err := app.MQTT.SubscribeStates(func(deviceID uint, peripheralType string, peripheralIndex int, state string) {
+			// Persist received state to DB; ignore errors in callback to avoid blocking
+			_ = app.Models.PeripheralState.SetState(deviceID, peripheralType, peripheralIndex, state)
+		}); err != nil {
+			log.Printf("Warning: failed to subscribe to MQTT states: %v", err)
+		}
+	}
 
 	app.serve()
 }
